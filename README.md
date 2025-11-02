@@ -1,5 +1,3 @@
-# Assignment3_ES
-
 # Fault-Tolerant Smart Monitoring System (FTSMS)
 
 A **fault-tolerant embedded system** built on the **Raspberry Pi Pico** that monitors temperature and humidity using **two redundant DHT sensors** and controls both a **fan** and **status LEDs**.  
