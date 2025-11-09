@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>FTSMS Live Dashboard</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+    h1 { margin: 0 0 12px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .card { border: 1px solid #8883; border-radius: 12px; padding: 16px; min-width: 280px; flex: 1; }
+    label { display: block; font-size: 0.9rem; margin-bottom: 6px; }
+    input[type=text] { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #8886; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #8886; cursor: pointer; }
+    .ok { color: #2e7d32; }
+    .warn { color: #ed6c02; }
+    .err { color: #c62828; }
+    .stat { font: 600 0.95rem/1.3 system-ui; }
+    .kv { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+    .badge { display:inline-block; padding:4px 10px; border-radius:999px; border:1px solid #8886; font-size:0.85rem; }
+    canvas { max-width: 100%; height: 240px; }
+    .muted { opacity: .7; font-size: .9rem; }
+    .footer { margin-top: 16px; }
+  </style>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <h1>FTSMS Live Dashboard</h1>
+  <p class="muted">Monitor your Pico W system in real time. Connect via WebSocket and send control commands.</p>
+
+  <div class="row">
+    <div class="card" style="max-width:680px;">
+      <label for="brokerUrl">Broker URL (WebSocket)</label>
+      <input id="brokerUrl" type="text" value="ws://192.168.1.10:9001/mqtt" />
+      <div style="margin-top:10px; display:flex; gap:10px;">
+        <button id="connectBtn">Connect</button>
+        <button id="disconnectBtn" disabled>Disconnect</button>
+        <span id="statusBadge" class="badge">disconnected</span>
+      </div>
+      <div class="footer muted">Use <code>ws://&lt;your_pc_ip&gt;:9001/mqtt</code></div>
+    </div>
+
+    <div class="card">
+      <div class="stat">Topic (telemetry): <code>ftsms/data</code></div>
+      <div class="stat">Topic (commands): <code>ftsms/command</code></div>
+      <div style="margin-top:10px; display:flex; gap:10px;">
+        <button id="btnReset" disabled>Send RESET</button>
+        <button id="btnAck" disabled>Send ACK</button>
+        <button id="btnTest" disabled>Send TEST</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:16px;">
+    <div class="card">
+      <h3>Live Status</h3>
+      <div class="kv">
+        <div>Device ID</div><div id="devId">—</div>
+        <div>Seq</div><div id="seq">—</div>
+        <div>Status</div><div id="status">—</div>
+        <div>Wi-Fi</div><div id="wifi">—</div>
+        <div>Temperature (°C)</div><div id="temp">—</div>
+        <div>Humidity (%)</div><div id="hum">—</div>
+        <div>Buzzer</div><div id="buzz">—</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Charts (last 120s)</h3>
+      <canvas id="tChart"></canvas>
+      <canvas id="hChart" style="margin-top:10px;"></canvas>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <h3>Raw Packet</h3>
+    <pre id="raw" style="white-space:pre-wrap;">—</pre>
+  </div>
+
+<script>
+let client = null, connected = false;
+const el = (id) => document.getElementById(id);
+const statusBadge = el('statusBadge');
+const btnConn = el('connectBtn');
+const btnDisc = el('disconnectBtn');
+const btnReset = el('btnReset');
+const btnAck = el('btnAck');
+const btnTest = el('btnTest');
+
+function setStatus(text, cls="") {
+  statusBadge.textContent = text;
+  statusBadge.className = "badge " + cls;
+}
+function setButtons(on) {
+  btnDisc.disabled = !on;
+  btnReset.disabled = !on;
+  btnAck.disabled = !on;
+  btnTest.disabled = !on;
+  btnConn.disabled = on;
+}
+
+function connect() {
+  const url = el('brokerUrl').value.trim();
+  if (!url) return alert("Enter WebSocket URL, e.g. ws://192.168.1.10:9001/mqtt");
+  setStatus('connecting…','warn');
+  try { client = mqtt.connect(url, { keepalive:30, reconnectPeriod:2000 }); }
+  catch(e){ setStatus('error','err'); return; }
+
+  client.on('connect', ()=>{ connected=true; setStatus('connected','ok'); setButtons(true); client.subscribe('ftsms/data'); });
+  client.on('reconnect', ()=>setStatus('reconnecting…','warn'));
+  client.on('close', ()=>{connected=false; setStatus('disconnected'); setButtons(false);});
+  client.on('error', ()=>setStatus('error','err'));
+  client.on('message', (t,p)=>{ if(t==='ftsms/data') handleTelemetry(p); });
+}
+function disconnect(){ if(client){ try{client.end(true);}catch(e){} } }
+btnConn.onclick = connect; btnDisc.onclick = disconnect;
+btnReset.onclick = ()=>publishCmd('reset');
+btnAck.onclick = ()=>publishCmd('ack');
+btnTest.onclick = ()=>publishCmd('test');
+function publishCmd(cmd){ if(client&&connected){ client.publish('ftsms/command', cmd); }}
+
+// --- Charts ---
+const tCtx=document.getElementById('tChart').getContext('2d');
+const hCtx=document.getElementById('hChart').getContext('2d');
+const timeLabels=[],tData=[],hData=[];
+const tChart=new Chart(tCtx,{type:'line',data:{labels:timeLabels,datasets:[{label:'Temp °C',data:tData,tension:0.2}]},options:{animation:false,scales:{x:{display:false},y:{beginAtZero:false}}}});
+const hChart=new Chart(hCtx,{type:'line',data:{labels:timeLabels,datasets:[{label:'Humidity %',data:hData,tension:0.2}]},options:{animation:false,scales:{x:{display:false},y:{beginAtZero:true,suggestedMax:100}}}});
+function pushPoint(t,h){
+  const label=new Date().toLocaleTimeString();
+  timeLabels.push(label); if(timeLabels.length>120)timeLabels.shift();
+  tData.push(t); if(tData.length>120)tData.shift();
+  hData.push(h); if(hData.length>120)hData.shift();
+  tChart.update(); hChart.update();
+}
+
+// --- Telemetry handling ---
+function handleTelemetry(payload){
+  let o; try{o=JSON.parse(payload.toString());}catch(e){el('raw').textContent=payload.toString();return;}
+  el('raw').textContent=JSON.stringify(o,null,2);
+  el('devId').textContent=o.device_id??'—';
+  el('seq').textContent=o.seq??'—';
+  el('status').textContent=o.status??'—';
+  el('wifi').textContent=o.wifi_status??'—';
+  el('temp').textContent=o.temperature_c??'—';
+  el('hum').textContent=o.humidity_pct??'—';
+  el('buzz').textContent=o.buzzer?'ON':'OFF';
+  if(typeof o.temperature_c==='number'&&typeof o.humidity_pct==='number')pushPoint(o.temperature_c,o.humidity_pct);
+}
+</script>
+</body>
+</html>
